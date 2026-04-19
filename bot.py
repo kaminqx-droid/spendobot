@@ -267,11 +267,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📷 Фото чека — распознаю каждую позицию\n"
         "✏️ Текст: «стики 8€» или «кофе 2.5€»\n\n"
         "Команды:\n"
-        "/сегодня — траты за день\n"
-        "/месяц — итоги за месяц\n"
-        "/категории — разбивка с бюджетом\n"
-        "/неделя — итоги за 7 дней\n"
-        "/удалить — удалить запись"
+        "/today — траты за день\n"
+        "/month — итоги за месяц\n"
+        "/categories — разбивка с бюджетом\n"
+        "/week — итоги за 7 дней\n"
+        "/delete — удалить запись"
     )
 
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -439,11 +439,11 @@ async def _send_receipt_confirmation(update: Update, data: dict):
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("сегодня", cmd_today))
-    app.add_handler(CommandHandler("месяц", cmd_month))
-    app.add_handler(CommandHandler("категории", cmd_categories))
-    app.add_handler(CommandHandler("неделя", cmd_week))
-    app.add_handler(CommandHandler("удалить", cmd_delete))
+    app.add_handler(CommandHandler("today", cmd_today))
+    app.add_handler(CommandHandler("month", cmd_month))
+    app.add_handler(CommandHandler("categories", cmd_categories))
+    app.add_handler(CommandHandler("week", cmd_week))
+    app.add_handler(CommandHandler("delete", cmd_delete))
     app.add_handler(CallbackQueryHandler(handle_delete_callback, pattern="^del_"))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
