@@ -311,7 +311,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📷 Фото или скриншот чека\n"
         "✏️ Текст, например: «кофе 250р» или «зарплата 80000»\n\n"
         "Команды:\n"
-        "/отмена — удалить последнюю запись\n\n"
+        "/cancel или /undo — удалить последнюю запись\n\n"
         "Всё остальное сделаю сам — распознаю и запишу в таблицу.",
         reply_markup=ReplyKeyboardRemove(),
     )
@@ -489,7 +489,7 @@ def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("отмена", cmd_undo))
+    app.add_handler(CommandHandler("cancel", cmd_undo))
     app.add_handler(CommandHandler("undo", cmd_undo))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
