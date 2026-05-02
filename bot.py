@@ -9,7 +9,7 @@ from datetime import datetime
 import anthropic
 import gspread
 from google.oauth2.service_account import Credentials
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
 # ─── Настройка логгирования ───────────────────────────────────────────────────
@@ -22,17 +22,16 @@ logger = logging.getLogger(__name__)
 # ─── Переменные окружения ─────────────────────────────────────────────────────
 TELEGRAM_TOKEN      = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_API_KEY   = os.environ["ANTHROPIC_API_KEY"]
-GOOGLE_CREDENTIALS  = os.environ["GOOGLE_CREDENTIALS"]   # JSON-строка
+GOOGLE_CREDENTIALS  = os.environ["GOOGLE_CREDENTIALS"]
 GOOGLE_SHEET_ID     = os.environ["GOOGLE_SHEET_ID"]
 CLAUDE_MODEL        = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-5-20250929")
 
 # ─── Google Sheets с кэшем подключения ────────────────────────────────────────
 _ws_cache = {"ws": None, "expires": 0}
-_header_added = False  # заголовок проверяем только один раз за сессию
+_header_added = False
 
 
 def get_worksheet():
-    """Возвращает worksheet, переподключаясь не чаще раза в 10 минут."""
     now = time.time()
     if _ws_cache["ws"] is None or now > _ws_cache["expires"]:
         creds_dict = json.loads(GOOGLE_CREDENTIALS)
@@ -44,13 +43,12 @@ def get_worksheet():
         gc = gspread.authorize(creds)
         sh = gc.open_by_key(GOOGLE_SHEET_ID)
         _ws_cache["ws"] = sh.sheet1
-        _ws_cache["expires"] = now + 600  # кэш на 10 минут
+        _ws_cache["expires"] = now + 600
         logger.info("Google Sheets: новое подключение")
     return _ws_cache["ws"]
 
 
 def ensure_header():
-    """Добавляет заголовок один раз за сессию бота."""
     global _header_added
     if _header_added:
         return
@@ -64,7 +62,6 @@ def ensure_header():
 
 
 def add_row(data: dict):
-    """Записывает одну строку в таблицу."""
     ensure_header()
     ws = get_worksheet()
     ws.append_row(
@@ -80,25 +77,6 @@ def add_row(data: dict):
     )
 
 
-def add_rows_batch(rows: list[dict]):
-    """Записывает несколько строк одним запросом — избегает 429."""
-    ensure_header()
-    ws = get_worksheet()
-    now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
-    values = [
-        [
-            r.get("date", ""),
-            r.get("store", ""),
-            r.get("amount", ""),
-            r.get("category", ""),
-            r.get("type", "расход"),
-            now_str,
-        ]
-        for r in rows
-    ]
-    ws.append_rows(values, value_input_option="USER_ENTERED")
-
-
 # ─── Claude API ────────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """Ты — помощник для учёта личных финансов семьи в Никосии.
 Твоя задача — извлечь ВСЕ позиции из чека и вернуть строго JSON без пояснений.
@@ -112,8 +90,8 @@ SYSTEM_PROMPT = """Ты — помощник для учёта личных фи
   "store": "название магазина",
   "type": "расход",
   "items": [
-    {"name": "название товара", "amount": 1.23, "category": "категория"},
-    {"name": "название товара", "amount": 4.56, "category": "категория"}
+    {"name": "название товара на русском", "amount": 1.23, "category": "категория"},
+    {"name": "название товара на русском", "amount": 4.56, "category": "категория"}
   ]
 }
 
@@ -161,7 +139,10 @@ SYSTEM_PROMPT = """Ты — помощник для учёта личных фи
 
 Язык чека может быть русский, английский или греческий — распознавай все три.
 Названия товаров в поле "name" ВСЕГДА переводи на русский язык.
-Примеры: ΜΑΡΟΥΛΙ → Салат, ΝΤΟΜΑΤΕΣ → Помидоры, ΚΑΡΟΤΤΑ → Морковь, AVOCADO → Авокадо, ΜΗΛΑ → Яблоки, ΣΤΑΦΥΛΙ → Виноград, ΑΓΓΟΥΡΑΚΙΑ → Огурцы, ΠΙΠΕΡΙΑ → Перец.
+Примеры: ΜΑΡΟΥΛΙ → Салат, ΝΤΟΜΑΤΕΣ → Помидоры, ΚΑΡΟΤΤΑ → Морковь, AVOCADO → Авокадо,
+ΜΗΛΑ → Яблоки, ΣΤΑΦΥΛΙ → Виноград, ΑΓΓΟΥΡΑΚΙΑ → Огурцы, ΠΙΠΕΡΙΑ → Перец,
+ΜΑΪΝΤΑΝΟ → Петрушка, ΑΝΗΘΟΣ → Укроп, ΚΡΕΜΜΥΔΙΑ → Лук, ΛΕΜΟΝΙΑ → Лимоны,
+ΕΛΙΕΣ → Оливки, ΚΟΛΟΚΥΘΑ → Кабачок/Тыква.
 Если дата не указана — используй сегодняшнее число.
 Отвечай ТОЛЬКО JSON, без лишнего текста."""
 
@@ -190,24 +171,20 @@ def parse_with_claude(image_b64: str | None = None, text: str | None = None) -> 
 
     msg = client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=2048,  # было 512 — не хватало для длинных чеков
+        max_tokens=2048,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": content}],
     )
 
     raw = msg.content[0].text.strip()
-
-    # Убираем markdown-обёртку если есть
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
     raw = re.sub(r"\s*```$", "", raw)
 
-    # Пробуем распарсить как есть
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
         pass
 
-    # Если JSON обрезан — пробуем вытащить хотя бы валидный кусок
     match = re.search(r"\{.*\}", raw, re.DOTALL)
     if match:
         try:
@@ -218,14 +195,49 @@ def parse_with_claude(image_b64: str | None = None, text: str | None = None) -> 
     raise ValueError(f"Claude вернул невалидный JSON:\n{raw[:300]}")
 
 
+# ─── Клавиатура подтверждения ─────────────────────────────────────────────────
+CONFIRM_KEYBOARD = ReplyKeyboardMarkup(
+    [["✅ Всё верно, записать"], ["✏️ Исправить"]],
+    resize_keyboard=True,
+    one_time_keyboard=True,
+)
+
+
+def build_preview(data: dict) -> str:
+    """Формирует текст предпросмотра для подтверждения."""
+    if "items" in data:
+        total = round(sum(i.get("amount", 0) for i in data["items"]), 2)
+        lines = [f"🧾 Чек из {data.get('store', '—')}\n"]
+        lines.append(f"📅 Дата: {data.get('date', '—')}\n")
+        lines.append("Позиции:")
+        for item in data["items"]:
+            lines.append(f"  • {item['name']} — {item['amount']}€ [{item['category']}]")
+        lines.append(f"\n💰 Итого: {total}€")
+        lines.append("\nВсё верно?")
+    else:
+        emoji = "💸" if data.get("type") == "расход" else "💰"
+        lines = [
+            f"{emoji} Распознано:\n",
+            f"📅 Дата: {data.get('date', '—')}",
+            f"🏪 Место: {data.get('store', '—')}",
+            f"💵 Сумма: {data.get('amount', 0)}€",
+            f"🏷 Категория: {data.get('category', '—')}",
+            f"📊 Тип: {data.get('type', '—')}",
+            "\nВсё верно?",
+        ]
+    return "\n".join(lines)
+
+
 # ─── Telegram handlers ────────────────────────────────────────────────────────
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
     await update.message.reply_text(
         "👋 Привет! Я записываю твои расходы и доходы.\n\n"
         "Просто отправь мне:\n"
         "📷 Фото или скриншот чека\n"
         "✏️ Текст, например: «кофе 250р» или «зарплата 80000»\n\n"
-        "Всё остальное сделаю сам — распознаю и запишу в таблицу."
+        "Всё остальное сделаю сам — распознаю и запишу в таблицу.",
+        reply_markup=ReplyKeyboardRemove(),
     )
 
 
@@ -239,23 +251,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         data = parse_with_claude(image_b64=image_b64)
-        if "items" in data:
-            # ✅ Один батч-запрос вместо N отдельных
-            rows = [
-                {
-                    "date": data.get("date"),
-                    "store": data.get("store"),
-                    "amount": item.get("amount"),
-                    "category": item.get("category"),
-                    "type": data.get("type", "расход"),
-                }
-                for item in data["items"]
-            ]
-            add_rows_batch(rows)
-            await _send_receipt_confirmation(update, data)
-        else:
-            add_row(data)
-            await _send_confirmation(update, data)
+        context.user_data["pending"] = data
+        context.user_data["state"] = "awaiting_confirm"
+
+        await update.message.reply_text(
+            build_preview(data),
+            reply_markup=CONFIRM_KEYBOARD,
+        )
     except Exception as e:
         logger.exception("Ошибка при обработке фото")
         await update.message.reply_text(f"❌ Не получилось разобрать чек: {e}")
@@ -266,37 +268,111 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
-    await update.message.reply_text("📝 Обрабатываю...")
+    state = context.user_data.get("state")
+
+    # ── Подтверждение ─────────────────────────────────────────────────────────
+    if state == "awaiting_confirm" and text == "✅ Всё верно, записать":
+        data = context.user_data.pop("pending", None)
+        context.user_data.pop("state", None)
+
+        if data is None:
+            await update.message.reply_text("⚠️ Нет данных для записи.", reply_markup=ReplyKeyboardRemove())
+            return
+
+        try:
+            if "items" in data:
+                # Одна итоговая строка вместо N позиций
+                total = round(sum(i.get("amount", 0) for i in data["items"]), 2)
+                add_row({
+                    "date": data.get("date"),
+                    "store": data.get("store"),
+                    "amount": total,
+                    "category": "еда",
+                    "type": data.get("type", "расход"),
+                })
+            else:
+                add_row(data)
+
+            await update.message.reply_text("✅ Записано в таблицу!", reply_markup=ReplyKeyboardRemove())
+        except Exception as e:
+            logger.exception("Ошибка при записи")
+            await update.message.reply_text(f"❌ Ошибка записи: {e}", reply_markup=ReplyKeyboardRemove())
+        return
+
+    # ── Запрос исправления ────────────────────────────────────────────────────
+    if state == "awaiting_confirm" and text == "✏️ Исправить":
+        context.user_data["state"] = "awaiting_correction"
+        await update.message.reply_text(
+            "✏️ Напиши что исправить.\n\n"
+            "Примеры:\n"
+            "• магазин — Lidl\n"
+            "• сумма — 35.50\n"
+            "• категория — кафе\n"
+            "• дата — 01.05.2026",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+
+    # ── Применение исправления ────────────────────────────────────────────────
+    if state == "awaiting_correction":
+        data = context.user_data.get("pending")
+        if data is None:
+            await update.message.reply_text("⚠️ Нет данных для исправления.")
+            context.user_data.clear()
+            return
+
+        lower = text.lower()
+        # Разбираем формат "ключ — значение" или "ключ: значение"
+        sep = "—" if "—" in text else ":"
+        val = text.split(sep, 1)[-1].strip() if sep in text else text.strip()
+
+        if any(w in lower for w in ["магазин", "место", "store"]):
+            data["store"] = val
+        elif any(w in lower for w in ["сумма", "amount"]):
+            try:
+                if "items" not in data:
+                    data["amount"] = float(val.replace(",", "."))
+            except ValueError:
+                await update.message.reply_text("⚠️ Неверный формат суммы. Пример: «сумма — 35.50»")
+                return
+        elif any(w in lower for w in ["категория", "category"]):
+            data["category"] = val.lower()
+        elif any(w in lower for w in ["дата", "date"]):
+            data["date"] = val.strip()
+        elif any(w in lower for w in ["тип", "type"]):
+            data["type"] = val.lower()
+        else:
+            await update.message.reply_text(
+                "🤔 Не понял что исправить.\n"
+                "Попробуй: «магазин — Lidl» или «сумма — 35.50»"
+            )
+            return
+
+        context.user_data["pending"] = data
+        context.user_data["state"] = "awaiting_confirm"
+
+        await update.message.reply_text(
+            "Обновлено! Проверь:\n\n" + build_preview(data),
+            reply_markup=CONFIRM_KEYBOARD,
+        )
+        return
+
+    # ── Новая трата текстом ───────────────────────────────────────────────────
+    context.user_data.clear()
+    await update.message.reply_text("📝 Обрабатываю...", reply_markup=ReplyKeyboardRemove())
 
     try:
         data = parse_with_claude(text=text)
-        add_row(data)
-        await _send_confirmation(update, data)
+        context.user_data["pending"] = data
+        context.user_data["state"] = "awaiting_confirm"
+
+        await update.message.reply_text(
+            build_preview(data),
+            reply_markup=CONFIRM_KEYBOARD,
+        )
     except Exception as e:
         logger.exception("Ошибка при обработке текста")
         await update.message.reply_text(f"❌ Не получилось разобрать: {e}")
-
-
-async def _send_confirmation(update: Update, data: dict):
-    emoji = "💸" if data.get("type") == "расход" else "💰"
-    await update.message.reply_text(
-        f"{emoji} Записано!\n\n"
-        f"📅 Дата: {data.get('date', '—')}\n"
-        f"🏪 Место: {data.get('store', '—')}\n"
-        f"💵 Сумма: {data.get('amount', 0)}€\n"
-        f"🏷 Категория: {data.get('category', '—')}\n"
-        f"📊 Тип: {data.get('type', '—')}"
-    )
-
-
-async def _send_receipt_confirmation(update: Update, data: dict):
-    lines = [f"🧾 Записано {len(data['items'])} позиций из {data.get('store', '—')}:\n"]
-    total = 0
-    for item in data["items"]:
-        lines.append(f"• {item['name']} — {item['amount']}€ [{item['category']}]")
-        total += item.get("amount", 0)
-    lines.append(f"\n💰 Итого: {round(total, 2)}€")
-    await update.message.reply_text("\n".join(lines))
 
 
 # ─── Запуск ───────────────────────────────────────────────────────────────────
