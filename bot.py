@@ -188,16 +188,32 @@ def parse_with_claude(image_b64: str | None = None, text: str | None = None) -> 
 
     msg = client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=512,
+        max_tokens=2048,  # было 512 — не хватало для длинных чеков
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": content}],
     )
 
     raw = msg.content[0].text.strip()
+
+    # Убираем markdown-обёртку если есть
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+
+    # Пробуем распарсить как есть
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
+    # Если JSON обрезан — пробуем вытащить хотя бы валидный кусок
     match = re.search(r"\{.*\}", raw, re.DOTALL)
     if match:
-        return json.loads(match.group())
-    return json.loads(raw)
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+
+    raise ValueError(f"Claude вернул невалидный JSON:\n{raw[:300]}")
 
 
 # ─── Telegram handlers ────────────────────────────────────────────────────────
