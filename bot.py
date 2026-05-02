@@ -5,6 +5,7 @@ import base64
 import re
 import time
 from datetime import datetime
+from pathlib import Path
 
 import anthropic
 import gspread
@@ -25,6 +26,41 @@ ANTHROPIC_API_KEY   = os.environ["ANTHROPIC_API_KEY"]
 GOOGLE_CREDENTIALS  = os.environ["GOOGLE_CREDENTIALS"]
 GOOGLE_SHEET_ID     = os.environ["GOOGLE_SHEET_ID"]
 CLAUDE_MODEL        = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-5-20250929")
+
+# ─── Память на исправления названий ──────────────────────────────────────────
+CORRECTIONS_FILE = Path("corrections.json")
+
+def load_corrections() -> dict:
+    """Загружает словарь исправлений {оригинал_lower: правильное_название}."""
+    if CORRECTIONS_FILE.exists():
+        try:
+            return json.loads(CORRECTIONS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+def save_correction(original: str, corrected: str):
+    """Сохраняет исправление для будущих чеков."""
+    corrections = load_corrections()
+    corrections[original.lower().strip()] = corrected.strip()
+    CORRECTIONS_FILE.write_text(
+        json.dumps(corrections, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+    logger.info(f"Сохранено исправление: '{original}' → '{corrected}'")
+
+def apply_corrections(data: dict) -> dict:
+    """Автоматически применяет сохранённые исправления к позициям чека."""
+    corrections = load_corrections()
+    if not corrections or "items" not in data:
+        return data
+    for item in data["items"]:
+        key = item.get("name", "").lower().strip()
+        if key in corrections:
+            old = item["name"]
+            item["name"] = corrections[key]
+            logger.info(f"Автоисправление: '{old}' → '{item['name']}'")
+    return data
 
 # ─── Google Sheets с кэшем подключения ────────────────────────────────────────
 _ws_cache = {"ws": None, "expires": 0}
@@ -155,16 +191,9 @@ def parse_with_claude(image_b64: str | None = None, text: str | None = None) -> 
         content = [
             {
                 "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/jpeg",
-                    "data": image_b64,
-                },
+                "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64},
             },
-            {
-                "type": "text",
-                "text": f"Сегодня {today}. Распарси этот чек и верни JSON.",
-            },
+            {"type": "text", "text": f"Сегодня {today}. Распарси этот чек и верни JSON."},
         ]
     else:
         content = f"Сегодня {today}. Пользователь написал: «{text}». Распарси и верни JSON."
@@ -195,6 +224,29 @@ def parse_with_claude(image_b64: str | None = None, text: str | None = None) -> 
     raise ValueError(f"Claude вернул невалидный JSON:\n{raw[:300]}")
 
 
+def parse_item_corrections(text: str) -> list[tuple[str, str]]:
+    """
+    Разбирает текст вида:
+      'maintano - петрушка\nголубой картофель - бэби картофель'
+    Возвращает список (оригинал, исправление).
+    """
+    results = []
+    for line in text.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # Поддержка разделителей: " - ", " — ", ": "
+        for sep in [" - ", " — ", ": ", "-", "—"]:
+            if sep in line:
+                parts = line.split(sep, 1)
+                orig = parts[0].strip()
+                fixed = parts[1].strip()
+                if orig and fixed:
+                    results.append((orig, fixed))
+                break
+    return results
+
+
 # ─── Клавиатура подтверждения ─────────────────────────────────────────────────
 CONFIRM_KEYBOARD = ReplyKeyboardMarkup(
     [["✅ Всё верно, записать"], ["✏️ Исправить"]],
@@ -204,7 +256,6 @@ CONFIRM_KEYBOARD = ReplyKeyboardMarkup(
 
 
 def build_preview(data: dict) -> str:
-    """Формирует текст предпросмотра для подтверждения."""
     if "items" in data:
         total = round(sum(i.get("amount", 0) for i in data["items"]), 2)
         lines = [f"🧾 Чек из {data.get('store', '—')}\n"]
@@ -251,13 +302,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         data = parse_with_claude(image_b64=image_b64)
+        data = apply_corrections(data)  # применяем сохранённые исправления
         context.user_data["pending"] = data
         context.user_data["state"] = "awaiting_confirm"
 
-        await update.message.reply_text(
-            build_preview(data),
-            reply_markup=CONFIRM_KEYBOARD,
-        )
+        await update.message.reply_text(build_preview(data), reply_markup=CONFIRM_KEYBOARD)
     except Exception as e:
         logger.exception("Ошибка при обработке фото")
         await update.message.reply_text(f"❌ Не получилось разобрать чек: {e}")
@@ -281,7 +330,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             if "items" in data:
-                # Одна итоговая строка вместо N позиций
                 total = round(sum(i.get("amount", 0) for i in data["items"]), 2)
                 add_row({
                     "date": data.get("date"),
@@ -304,16 +352,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["state"] = "awaiting_correction"
         await update.message.reply_text(
             "✏️ Напиши что исправить.\n\n"
-            "Примеры:\n"
-            "• магазин — Lidl\n"
-            "• сумма — 35.50\n"
-            "• категория — кафе\n"
-            "• дата — 01.05.2026",
+            "Для названий товаров (можно несколько строк):\n"
+            "  maintano - Петрушка\n"
+            "  голубой картофель - Бэби картофель\n\n"
+            "Для общих полей:\n"
+            "  магазин - Lidl\n"
+            "  сумма - 35.50\n"
+            "  категория - кафе\n"
+            "  дата - 01.05.2026",
             reply_markup=ReplyKeyboardRemove(),
         )
         return
 
-    # ── Применение исправления ────────────────────────────────────────────────
+    # ── Применение исправлений ────────────────────────────────────────────────
     if state == "awaiting_correction":
         data = context.user_data.get("pending")
         if data is None:
@@ -321,38 +372,64 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.clear()
             return
 
-        lower = text.lower()
-        # Разбираем формат "ключ — значение" или "ключ: значение"
-        sep = "—" if "—" in text else ":"
-        val = text.split(sep, 1)[-1].strip() if sep in text else text.strip()
-
-        if any(w in lower for w in ["магазин", "место", "store"]):
-            data["store"] = val
-        elif any(w in lower for w in ["сумма", "amount"]):
-            try:
-                if "items" not in data:
-                    data["amount"] = float(val.replace(",", "."))
-            except ValueError:
-                await update.message.reply_text("⚠️ Неверный формат суммы. Пример: «сумма — 35.50»")
-                return
-        elif any(w in lower for w in ["категория", "category"]):
-            data["category"] = val.lower()
-        elif any(w in lower for w in ["дата", "date"]):
-            data["date"] = val.strip()
-        elif any(w in lower for w in ["тип", "type"]):
-            data["type"] = val.lower()
-        else:
+        pairs = parse_item_corrections(text)
+        if not pairs:
             await update.message.reply_text(
-                "🤔 Не понял что исправить.\n"
-                "Попробуй: «магазин — Lidl» или «сумма — 35.50»"
+                "🤔 Не понял формат. Напиши так:\n"
+                "  maintano - Петрушка\n"
+                "  магазин - Lidl"
             )
             return
+
+        applied = []
+        for orig, fixed in pairs:
+            orig_lower = orig.lower()
+
+            # Проверяем поля верхнего уровня
+            if orig_lower in ("магазин", "место", "store"):
+                data["store"] = fixed
+                applied.append(f"магазин → {fixed}")
+            elif orig_lower in ("сумма", "amount"):
+                try:
+                    if "items" not in data:
+                        data["amount"] = float(fixed.replace(",", "."))
+                    applied.append(f"сумма → {fixed}")
+                except ValueError:
+                    pass
+            elif orig_lower in ("категория", "category"):
+                data["category"] = fixed.lower()
+                applied.append(f"категория → {fixed}")
+            elif orig_lower in ("дата", "date"):
+                data["date"] = fixed
+                applied.append(f"дата → {fixed}")
+            elif orig_lower in ("тип", "type"):
+                data["type"] = fixed.lower()
+                applied.append(f"тип → {fixed}")
+            elif "items" in data:
+                # Ищем товар по частичному совпадению названия
+                matched = False
+                for item in data["items"]:
+                    if orig_lower in item["name"].lower() or item["name"].lower() in orig_lower:
+                        old_name = item["name"]
+                        item["name"] = fixed
+                        save_correction(old_name, fixed)  # запоминаем на будущее
+                        applied.append(f"{old_name} → {fixed}")
+                        matched = True
+                        break
+                if not matched:
+                    # Сохраняем как новое правило даже если не нашли в текущем чеке
+                    save_correction(orig, fixed)
+                    applied.append(f"📝 Запомнил: {orig} → {fixed}")
+            else:
+                save_correction(orig, fixed)
+                applied.append(f"📝 Запомнил: {orig} → {fixed}")
 
         context.user_data["pending"] = data
         context.user_data["state"] = "awaiting_confirm"
 
+        applied_text = "\n".join(f"  ✓ {a}" for a in applied)
         await update.message.reply_text(
-            "Обновлено! Проверь:\n\n" + build_preview(data),
+            f"Исправлено:\n{applied_text}\n\nПроверь:\n\n" + build_preview(data),
             reply_markup=CONFIRM_KEYBOARD,
         )
         return
@@ -363,13 +440,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         data = parse_with_claude(text=text)
+        data = apply_corrections(data)
         context.user_data["pending"] = data
         context.user_data["state"] = "awaiting_confirm"
 
-        await update.message.reply_text(
-            build_preview(data),
-            reply_markup=CONFIRM_KEYBOARD,
-        )
+        await update.message.reply_text(build_preview(data), reply_markup=CONFIRM_KEYBOARD)
     except Exception as e:
         logger.exception("Ошибка при обработке текста")
         await update.message.reply_text(f"❌ Не получилось разобрать: {e}")
