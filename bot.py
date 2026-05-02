@@ -84,6 +84,25 @@ def add_row(data: dict):
         value_input_option="USER_ENTERED",
     )
 
+def add_rows_batch(items: list, date: str, store: str, entry_type: str):
+    """Записывает все позиции чека одним батчевым вызовом — избегает 429 от Google."""
+    ws = get_worksheet()
+    ensure_header(ws)
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    rows = []
+    for item in items:
+        amount = -abs(float(item.get("amount", 0)))
+        rows.append([
+            date,
+            store,
+            amount,
+            item.get("category", ""),
+            entry_type,
+            now,
+        ])
+    if rows:
+        ws.append_rows(rows, value_input_option="USER_ENTERED")
+
 def get_all_rows():
     ws = get_worksheet()
     rows = ws.get_all_values()
@@ -372,17 +391,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         data = parse_with_claude(image_b64=image_b64)
         if "items" in data:
-            categories_used = set()
-            for item in data["items"]:
-                add_row({
-                    "date": data.get("date"),
-                    "store": data.get("store"),
-                    "amount": item.get("amount"),
-                    "category": item.get("category"),
-                    "type": data.get("type", "расход"),
-                })
-                categories_used.add(item.get("category", ""))
+            # Батчевая запись — один вызов вместо N отдельных
+            add_rows_batch(
+                items=data["items"],
+                date=data.get("date", ""),
+                store=data.get("store", ""),
+                entry_type=data.get("type", "расход"),
+            )
             await _send_receipt_confirmation(update, data)
+            # Алерты по уникальным категориям
+            categories_used = {item.get("category", "") for item in data["items"]}
             for cat in categories_used:
                 alert = check_budget_alert(cat)
                 if alert:
