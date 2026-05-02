@@ -163,10 +163,18 @@ SYSTEM_PROMPT = """Ты — помощник для учёта личных фи
   "date": "DD.MM.YYYY",
   "store": "название магазина",
   "type": "расход",
+  "grand_total": 49.71,
   "items": [
     {"name": "название на русском", "amount": 1.23, "category": "категория"}
   ]
 }
+
+ВАЖНЫЕ ПРАВИЛА ДЛЯ ЧЕКОВ:
+- В поле "grand_total" всегда ставь итоговую сумму с чека (Grand Total / Σύνολο / Итого) — НЕ считай сам
+- В "items" включай ТОЛЬКО реальные товары/продукты
+- НЕ включай в items: налоги (VAT, НДС), скидки, сборы, строки ΔΙΑΦΟΡΑ, итоговые строки
+- Сумма items может не совпадать с grand_total — это нормально (налоги, округления)
+- Каждый товар — отдельная строка, amount = итоговая цена этой позиции (Total V)
 
 ФОРМАТ — текст:
 {
@@ -445,10 +453,10 @@ async def _send_confirmation(update: Update, data: dict):
 
 async def _send_receipt_confirmation(update: Update, data: dict):
     lines = [f"🧾 {data.get('store', '—')} · {data.get('date', '')}:\n"]
-    total = 0
     for item in data["items"]:
         lines.append(f"• {item['name']} — -{item['amount']}€ [{item['category']}]")
-        total += item.get("amount", 0)
+    # Берём grand_total с чека, если есть — иначе считаем сами
+    total = data.get("grand_total") or sum(item.get("amount", 0) for item in data["items"])
     lines.append(f"\n💶 Итого: -{round(total, 2)}€")
     lines.append(f"✅ {len(data['items'])} позиций записано")
     await update.message.reply_text("\n".join(lines))
