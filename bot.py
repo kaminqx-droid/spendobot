@@ -111,6 +111,8 @@ def add_row(data: dict):
         ],
         value_input_option="USER_ENTERED",
     )
+    # Запоминаем номер последней строки для возможной отмены
+    _ws_cache["last_row"] = len(ws.get_all_values())
 
 
 # ─── Claude API ────────────────────────────────────────────────────────────────
@@ -249,7 +251,7 @@ def parse_item_corrections(text: str) -> list[tuple[str, str]]:
 
 # ─── Клавиатура подтверждения ─────────────────────────────────────────────────
 CONFIRM_KEYBOARD = ReplyKeyboardMarkup(
-    [["✅ Всё верно, записать"], ["✏️ Исправить"]],
+    [["✅ Всё верно, записать"], ["✏️ Исправить"], ["❌ Отменить"]],
     resize_keyboard=True,
     one_time_keyboard=True,
 )
@@ -280,6 +282,27 @@ def build_preview(data: dict) -> str:
 
 
 # ─── Telegram handlers ────────────────────────────────────────────────────────
+async def cmd_undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Удаляет последнюю записанную строку из таблицы."""
+    last_row = _ws_cache.get("last_row")
+    if not last_row:
+        await update.message.reply_text("⚠️ Нет записей для отмены в этой сессии.")
+        return
+    try:
+        ws = get_worksheet()
+        # Читаем строку перед удалением чтобы показать что удалили
+        row_values = ws.row_values(last_row)
+        ws.delete_rows(last_row)
+        _ws_cache["last_row"] = None
+        info = f"{row_values[0]} | {row_values[1]} | {row_values[2]}€ | {row_values[3]}" if row_values else "—"
+        await update.message.reply_text(
+            f"↩️ Последняя запись удалена:\n{info}"
+        )
+    except Exception as e:
+        logger.exception("Ошибка при отмене записи")
+        await update.message.reply_text(f"❌ Не удалось отменить: {e}")
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text(
@@ -287,6 +310,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Просто отправь мне:\n"
         "📷 Фото или скриншот чека\n"
         "✏️ Текст, например: «кофе 250р» или «зарплата 80000»\n\n"
+        "Команды:\n"
+        "/отмена — удалить последнюю запись\n\n"
         "Всё остальное сделаю сам — распознаю и запишу в таблицу.",
         reply_markup=ReplyKeyboardRemove(),
     )
@@ -318,6 +343,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     state = context.user_data.get("state")
+
+    # ── Отмена текущего ввода ─────────────────────────────────────────────────
+    if state == "awaiting_confirm" and text == "❌ Отменить":
+        context.user_data.clear()
+        await update.message.reply_text(
+            "🚫 Запись отменена. Ничего не сохранено.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
 
     # ── Подтверждение ─────────────────────────────────────────────────────────
     if state == "awaiting_confirm" and text == "✅ Всё верно, записать":
@@ -455,6 +489,8 @@ def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("отмена", cmd_undo))
+    app.add_handler(CommandHandler("undo", cmd_undo))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
