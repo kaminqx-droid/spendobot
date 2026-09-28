@@ -1,5 +1,0 @@
-python-telegram-bot[job-queue]>=21.0
-gspread>=5.12
-google-auth>=2.0
-anthropic>=0.40
-tzdata
